@@ -46,7 +46,9 @@ def save_to_history_csv(session_data):
         'result': session_data.get('result', 'incomplete'),
         'notes': session_data.get('notes', ''),
         'session_number': session_data.get('session_number', 1),
-        'final_balance': session_data.get('final_balance', 0)
+        'final_balance': session_data.get('final_balance', 0),
+        'banker_wins': session_data.get('banker_wins', 0),
+        'player_wins': session_data.get('player_wins', 0)
     }
 
     if os.path.exists(history_file):
@@ -83,6 +85,8 @@ def save_current_session():
         'session1_pnl': st.session_state.session1_pnl,
         'session2_balance': st.session_state.session2_balance,
         'session2_pnl': st.session_state.session2_pnl,
+        'banker_wins': st.session_state.banker_wins,
+        'player_wins': st.session_state.player_wins,
         'result': "active",
         'date': str(date.today()),
         'last_update': datetime.now().isoformat()
@@ -125,6 +129,8 @@ def save_daily_stats():
         'session2_pnl': st.session_state.session2_pnl,
         'total_trades': st.session_state.trades,
         'total_pnl': st.session_state.balance - st.session_state.start_bal,
+        'banker_wins': st.session_state.banker_wins,
+        'player_wins': st.session_state.player_wins,
         'last_update': datetime.now().isoformat()
     }
 
@@ -190,6 +196,8 @@ def reset_session_data():
         st.session_state.session1_pnl = 0.0
         st.session_state.session2_balance = 0.0
         st.session_state.session2_pnl = 0.0
+        st.session_state.banker_wins = 0
+        st.session_state.player_wins = 0
 
         # Clear current session file
         if os.path.exists(CURRENT_SESSION_FILE):
@@ -229,7 +237,9 @@ DEFS = dict(
     session1_balance=0.0,
     session1_pnl=0.0,
     session2_balance=0.0,
-    session2_pnl=0.0
+    session2_pnl=0.0,
+    banker_wins=0,
+    player_wins=0
 )
 
 # Load saved session if exists
@@ -244,6 +254,8 @@ if daily_stats:
     DEFS['session1_pnl'] = daily_stats.get('session1_pnl', 0.0)
     DEFS['session2_balance'] = daily_stats.get('session2_balance', 0.0)
     DEFS['session2_pnl'] = daily_stats.get('session2_pnl', 0.0)
+    DEFS['banker_wins'] = daily_stats.get('banker_wins', 0)
+    DEFS['player_wins'] = daily_stats.get('player_wins', 0)
 
 if saved_session:
     for k, v in saved_session.items():
@@ -321,9 +333,10 @@ with st.sidebar:
     if st.session_state.day_started:
         st.markdown("### 📈 Current Session Stats")
         st.metric("Trades", st.session_state.trades)
-        st.metric("Wins", st.session_state.wins)
+        st.metric("Banker Wins", st.session_state.banker_wins)
+        st.metric("Player Wins", st.session_state.player_wins)
         st.metric("Losses", st.session_state.losses)
-        win_rate = (st.session_state.wins / st.session_state.trades * 100) if st.session_state.trades > 0 else 0
+        win_rate = (st.session_state.banker_wins + st.session_state.player_wins) / st.session_state.trades * 100 if st.session_state.trades > 0 else 0
         st.metric("Win Rate", f"{win_rate:.0f}%")
 
     st.markdown("---")
@@ -355,7 +368,7 @@ with st.sidebar:
         st.info("No history yet")
 
 # Header
-st.markdown('<h1 style="text-align:center; font-size:1.8rem; margin:0 0 0.3rem 0;">🎰 STAKE TRACKER</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="text-align:center; font-size:1.8rem; margin:0 0 0.3rem 0;">🎰 BACCARAT TRACKER</h1>', unsafe_allow_html=True)
 
 # Check if both sessions are completed
 if st.session_state.session2_completed:
@@ -386,8 +399,16 @@ if st.session_state.session2_completed:
                         <div style="font-size:1.3rem; font-weight:bold; color:{s1_color};">{s1_sign}₹{abs(st.session_state.session1_pnl):,.0f}</div>
                     </div>
                     <div>
-                        <div style="font-size:0.7rem; color:#888;">RESULT</div>
-                        <div style="font-size:1rem; font-weight:bold; color:{s1_color};">{'PROFIT 🎉' if st.session_state.session1_pnl >= 0 else 'LOSS 💀'}</div>
+                        <div style="font-size:0.7rem; color:#888;">BANKER WINS</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#ef4444;">{st.session_state.get('session1_banker_wins', 0)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.7rem; color:#888;">PLAYER WINS</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#3b82f6;">{st.session_state.get('session1_player_wins', 0)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.7rem; color:#888;">LOSSES</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#6b7280;">{st.session_state.get('session1_losses', 0)}</div>
                     </div>
                 </div>
             </div>
@@ -414,8 +435,16 @@ if st.session_state.session2_completed:
                         <div style="font-size:1.3rem; font-weight:bold; color:{s2_color};">{s2_sign}₹{abs(st.session_state.session2_pnl):,.0f}</div>
                     </div>
                     <div>
-                        <div style="font-size:0.7rem; color:#888;">RESULT</div>
-                        <div style="font-size:1rem; font-weight:bold; color:{s2_color};">{'PROFIT 🎉' if st.session_state.session2_pnl >= 0 else 'LOSS 💀'}</div>
+                        <div style="font-size:0.7rem; color:#888;">BANKER WINS</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#ef4444;">{st.session_state.get('session2_banker_wins', 0)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.7rem; color:#888;">PLAYER WINS</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#3b82f6;">{st.session_state.get('session2_player_wins', 0)}</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.7rem; color:#888;">LOSSES</div>
+                        <div style="font-size:1.3rem; font-weight:bold; color:#6b7280;">{st.session_state.get('session2_losses', 0)}</div>
                     </div>
                 </div>
             </div>
@@ -471,7 +500,6 @@ if not st.session_state.day_started:
 
         if st.session_state.session1_completed and not st.session_state.session2_completed:
             session_num = 2
-            # Use Session 1's final balance as starting balance for Session 2
             default_start_bal = st.session_state.session1_balance if st.session_state.session1_balance > 0 else 1000.0
             st.markdown(f'''
                 <div style="background:#10b98120; border:2px solid #10b981; border-radius:10px; padding:0.6rem; text-align:center; margin-bottom:1rem;">
@@ -479,7 +507,6 @@ if not st.session_state.day_started:
                 </div>
             ''', unsafe_allow_html=True)
 
-            # Show previous session result
             prev_pnl = st.session_state.session1_pnl
             prev_color = "#10b981" if prev_pnl >= 0 else "#ef4444"
             prev_sign = "+" if prev_pnl >= 0 else ""
@@ -532,6 +559,7 @@ if not st.session_state.day_started:
                 target_amt=tg_amt,
                 summary_shown=False,
                 wins=0, losses=0, win_amt=0, loss_amt=0, trades=0, bet=0,
+                banker_wins=0, player_wins=0,
                 notes="", saved=False,
                 current_session=session_num
             ))
@@ -564,7 +592,7 @@ else:
 stop_hit = sl_amt > 0 and day_loss >= sl_amt
 target_hit = tg_amt > 0 and day_gain >= tg_amt
 game_over = stop_hit or target_hit
-wr = (st.session_state.wins / st.session_state.trades * 100) if st.session_state.trades > 0 else 0
+wr = (st.session_state.banker_wins + st.session_state.player_wins) / st.session_state.trades * 100 if st.session_state.trades > 0 else 0
 avg_bet = (st.session_state.win_amt + st.session_state.loss_amt) / st.session_state.trades if st.session_state.trades > 0 else 0
 
 # Determine colors for current balance
@@ -586,11 +614,17 @@ if game_over and not st.session_state.get('saved', False):
         st.session_state.sessions_played = 1
         st.session_state.session1_balance = st.session_state.balance
         st.session_state.session1_pnl = net
+        st.session_state.session1_banker_wins = st.session_state.banker_wins
+        st.session_state.session1_player_wins = st.session_state.player_wins
+        st.session_state.session1_losses = st.session_state.losses
     elif st.session_state.current_session == 2:
         st.session_state.session2_completed = True
         st.session_state.sessions_played = 2
         st.session_state.session2_balance = st.session_state.balance
         st.session_state.session2_pnl = net
+        st.session_state.session2_banker_wins = st.session_state.banker_wins
+        st.session_state.session2_player_wins = st.session_state.player_wins
+        st.session_state.session2_losses = st.session_state.losses
 
     # Save to history
     session_data = {
@@ -601,7 +635,7 @@ if game_over and not st.session_state.get('saved', False):
         'stop_amt': sl_amt,
         'target_amt': tg_amt,
         'trades': st.session_state.trades,
-        'wins': st.session_state.wins,
+        'wins': st.session_state.banker_wins + st.session_state.player_wins,
         'losses': st.session_state.losses,
         'win_amt': st.session_state.win_amt,
         'loss_amt': st.session_state.loss_amt,
@@ -609,7 +643,9 @@ if game_over and not st.session_state.get('saved', False):
         'notes': st.session_state.notes,
         'session_number': st.session_state.current_session,
         'result': "stop_loss" if stop_hit else "target",
-        'final_balance': st.session_state.balance
+        'final_balance': st.session_state.balance,
+        'banker_wins': st.session_state.banker_wins,
+        'player_wins': st.session_state.player_wins
     }
     save_to_history_csv(session_data)
 
@@ -694,20 +730,20 @@ with col3:
         </div>
     ''', unsafe_allow_html=True)
 
-# Stats Row 2
+# Stats Row 2 - Win counters
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.markdown(f'''
-        <div style="background:#00000030; padding:0.4rem; border-radius:8px; text-align:center;">
-            <div style="font-size:0.6rem; color:#888;">✅ WINS</div>
-            <div style="font-size:1rem; font-weight:bold; color:#10b981;">{st.session_state.wins}</div>
+        <div style="background:#ef444410; padding:0.4rem; border-radius:8px; text-align:center;">
+            <div style="font-size:0.6rem; color:#ef4444;">🔴 BANKER WINS</div>
+            <div style="font-size:1rem; font-weight:bold; color:#ef4444;">{st.session_state.banker_wins}</div>
         </div>
     ''', unsafe_allow_html=True)
 with col2:
     st.markdown(f'''
-        <div style="background:#00000030; padding:0.4rem; border-radius:8px; text-align:center;">
-            <div style="font-size:0.6rem; color:#888;">❌ LOSSES</div>
-            <div style="font-size:1rem; font-weight:bold; color:#ef4444;">{st.session_state.losses}</div>
+        <div style="background:#3b82f610; padding:0.4rem; border-radius:8px; text-align:center;">
+            <div style="font-size:0.6rem; color:#3b82f6;">🔵 PLAYER WINS</div>
+            <div style="font-size:1rem; font-weight:bold; color:#3b82f6;">{st.session_state.player_wins}</div>
         </div>
     ''', unsafe_allow_html=True)
 with col3:
@@ -810,37 +846,81 @@ with col4:
             auto_save()
             st.rerun()
 
-# Win/Loss Buttons
-st.markdown('<div style="font-size:0.8rem; font-weight:bold; margin:0.5rem 0 0.3rem 0;">🎯 RECORD RESULT</div>', unsafe_allow_html=True)
+# Banker, Player & Loss Buttons (Ratio 1:1:2)
+st.markdown('<div style="font-size:0.8rem; font-weight:bold; margin:0.5rem 0 0.3rem 0;">🎯 PLACE BET</div>', unsafe_allow_html=True)
 bet_ok = st.session_state.bet > 0
 
-col1, col2 = st.columns(2)
+# Create three columns with ratio 1:1:2
+col1, col2, col3 = st.columns([1, 1, 2])
+
 with col1:
-    if st.button("✅ WIN", use_container_width=True, disabled=not bet_ok):
+    # Banker Button - Red, 95% payout (5% commission)
+    banker_commission = 0.95
+    if st.button("🔴 BANKER", use_container_width=True, disabled=not bet_ok):
         st.session_state.last_action = {
             'balance': st.session_state.balance,
             'win_amt': st.session_state.win_amt,
             'wins': st.session_state.wins,
             'trades': st.session_state.trades,
-            'bet': st.session_state.bet
+            'bet': st.session_state.bet,
+            'banker_wins': st.session_state.banker_wins,
+            'player_wins': st.session_state.player_wins,
+            'losses': st.session_state.losses
         }
         amt = st.session_state.bet
-        st.session_state.balance += amt
-        st.session_state.win_amt += amt
+        winnings = amt * banker_commission
+        st.session_state.balance += winnings
+        st.session_state.win_amt += winnings
         st.session_state.wins += 1
+        st.session_state.banker_wins += 1
         st.session_state.trades += 1
         st.session_state.bet = 0.0
+
+        commission_amount = amt - winnings
+        st.toast(f"🔴 Banker won! +₹{winnings:,.0f} (Commission: ₹{commission_amount:,.0f})", icon="💰")
         play_sound('win')
         auto_save()
         st.rerun()
+
 with col2:
-    if st.button("❌ LOSS", use_container_width=True, disabled=not bet_ok):
+    # Player Button - Blue, 100% payout (no commission)
+    if st.button("🔵 PLAYER", use_container_width=True, disabled=not bet_ok):
+        st.session_state.last_action = {
+            'balance': st.session_state.balance,
+            'win_amt': st.session_state.win_amt,
+            'wins': st.session_state.wins,
+            'trades': st.session_state.trades,
+            'bet': st.session_state.bet,
+            'banker_wins': st.session_state.banker_wins,
+            'player_wins': st.session_state.player_wins,
+            'losses': st.session_state.losses
+        }
+        amt = st.session_state.bet
+        winnings = amt
+        st.session_state.balance += winnings
+        st.session_state.win_amt += winnings
+        st.session_state.wins += 1
+        st.session_state.player_wins += 1
+        st.session_state.trades += 1
+        st.session_state.bet = 0.0
+
+        st.toast(f"🔵 Player won! +₹{winnings:,.0f}", icon="💰")
+        play_sound('win')
+        auto_save()
+        st.rerun()
+
+with col3:
+    # Loss Button - Gray/Dark, loses full bet
+    if st.button("⚫ LOSS", use_container_width=True, disabled=not bet_ok):
         st.session_state.last_action = {
             'balance': st.session_state.balance,
             'loss_amt': st.session_state.loss_amt,
             'losses': st.session_state.losses,
             'trades': st.session_state.trades,
-            'bet': st.session_state.bet
+            'bet': st.session_state.bet,
+            'banker_wins': st.session_state.banker_wins,
+            'player_wins': st.session_state.player_wins,
+            'losses': st.session_state.losses
         }
         amt = st.session_state.bet
         st.session_state.balance -= amt
@@ -848,9 +928,54 @@ with col2:
         st.session_state.losses += 1
         st.session_state.trades += 1
         st.session_state.bet = 0.0
+
+        st.toast(f"⚫ You lost! -₹{amt:,.0f}", icon="💀")
         play_sound('loss')
         auto_save()
         st.rerun()
+
+# Custom CSS for button styling
+st.markdown("""
+    <style>
+    .stButton button {
+        white-space: normal !important;
+        line-height: 1.4 !important;
+        font-weight: bold !important;
+        font-size: 1.1rem !important;
+        padding: 0.75rem 0.5rem !important;
+    }
+
+    /* Banker button red */
+    div[data-testid="column"]:nth-child(1) .stButton button {
+        background: linear-gradient(135deg, #dc2626, #991b1b) !important;
+        border: 2px solid #ef4444 !important;
+        color: white !important;
+    }
+
+    /* Player button blue */
+    div[data-testid="column"]:nth-child(2) .stButton button {
+        background: linear-gradient(135deg, #3b82f6, #1e40af) !important;
+        border: 2px solid #60a5fa !important;
+        color: white !important;
+    }
+
+    /* Loss button gray/dark */
+    div[data-testid="column"]:nth-child(3) .stButton button {
+        background: linear-gradient(135deg, #4b5563, #1f2937) !important;
+        border: 2px solid #6b7280 !important;
+        color: white !important;
+    }
+
+    .stButton button:hover:not(:disabled) {
+        transform: translateY(-2px) !important;
+        filter: brightness(1.1) !important;
+    }
+
+    .stButton button:active:not(:disabled) {
+        transform: translateY(0) !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 if not bet_ok:
     st.markdown('<p style="text-align:center; color:#f59e0b; font-size:0.7rem; margin:0.3rem 0;">⚠️ Select chips first</p>', unsafe_allow_html=True)

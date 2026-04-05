@@ -1,13 +1,15 @@
 {
   "date": "2026-04-05",
-  "sessions_played": 1,
+  "sessions_played": 2,
   "session1_completed": true,
-  "session2_completed": false,
-  "session1_balance": 1150.0,
-  "session1_pnl": 150.0,
-  "session2_balance": 0.0,
-  "session2_pnl": 0.0,
-  "total_trades": 0,
-  "total_pnl": 0.0,
-  "last_update": "2026-04-05T16:48:58.017050"
+  "session2_completed": true,
+  "session1_balance": 1195.0,
+  "session1_pnl": 195.0,
+  "session2_balance": 1075.0,
+  "session2_pnl": -120.0,
+  "total_trades": 2,
+  "total_pnl": -120.0,
+  "banker_wins": 0,
+  "player_wins": 0,
+  "last_update": "2026-04-05T17:15:50.920146"
 }
