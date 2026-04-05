@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from utils.data_manager import DataManager
 from utils.sounds import play_sound
 
@@ -18,9 +18,11 @@ st.set_page_config(
 CURRENT_SESSION_FILE = "current_session.json"
 DAILY_STATS_FILE     = "daily_stats.json"
 HISTORY_CSV_FILE     = "stake_history.csv"
+SESSION_TIMES_FILE   = "session_times.json"   # NEW: tracks session start/end timestamps
 
-# FIX 1: Chips sorted in ascending order by value
-CHIP_DEFS = [
+SESSION_GAP_HOURS    = 6                       # Minimum hours between sessions
+
+CHIP_DEFS = sorted([
     {"label": "₹10",   "coin": 10},
     {"label": "₹20",   "coin": 20},
     {"label": "₹40",   "coin": 40},
@@ -36,27 +38,12 @@ CHIP_DEFS = [
     {"label": "₹500",  "coin": 500},
     {"label": "₹800",  "coin": 800},
     {"label": "₹1000", "coin": 1_000},
-]
-# Already ascending — explicitly sort to guarantee order
-CHIP_DEFS = sorted(CHIP_DEFS, key=lambda x: x["coin"])
+], key=lambda x: x["coin"])
 
-# FIX 2: 15 distinct colors covering ALL chips (one per chip, in order)
 CHIP_COLORS = [
-    "#6366f1",  # ₹10   – indigo
-    "#8b5cf6",  # ₹20   – violet
-    "#a855f7",  # ₹40   – purple
-    "#ec4899",  # ₹60   – pink
-    "#f43f5e",  # ₹80   – rose
-    "#ef4444",  # ₹100  – red
-    "#f97316",  # ₹120  – orange
-    "#f59e0b",  # ₹140  – amber
-    "#eab308",  # ₹160  – yellow
-    "#84cc16",  # ₹180  – lime
-    "#22c55e",  # ₹200  – green
-    "#10b981",  # ₹400  – emerald
-    "#14b8a6",  # ₹500  – teal
-    "#06b6d4",  # ₹800  – cyan
-    "#3b82f6",  # ₹1000 – blue
+    "#6366f1","#8b5cf6","#a855f7","#ec4899","#f43f5e",
+    "#ef4444","#f97316","#f59e0b","#eab308","#84cc16",
+    "#22c55e","#10b981","#14b8a6","#06b6d4","#3b82f6",
 ]
 
 # ── Global CSS ───────────────────────────────────────────────────────────────
@@ -64,14 +51,9 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Exo+2:wght@300;400;700&display=swap');
 
-html, body, [class*="css"] {
-    font-family: 'Exo 2', sans-serif;
-}
-
-/* Remove default Streamlit padding */
+html, body, [class*="css"] { font-family: 'Exo 2', sans-serif; }
 .block-container { padding-top: 0.8rem !important; }
 
-/* Dark card utility */
 .card {
     background: linear-gradient(135deg, #0f0f1a, #1a1a2e);
     border-radius: 14px;
@@ -79,14 +61,12 @@ html, body, [class*="css"] {
     margin-bottom: 0.6rem;
 }
 
-/* Chip buttons */
 button[kind="secondary"] {
     border-radius: 50px !important;
     font-weight: 700 !important;
     letter-spacing: 0.5px !important;
 }
 
-/* Pulse animation for active session indicator */
 @keyframes pulse-border {
     0%   { box-shadow: 0 0 0 0 rgba(102,126,234,0.5); }
     70%  { box-shadow: 0 0 0 8px rgba(102,126,234,0); }
@@ -94,7 +74,13 @@ button[kind="secondary"] {
 }
 .pulse { animation: pulse-border 2s infinite; }
 
-/* Bet/action button overrides */
+@keyframes countdown-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(245,158,11,0.4); }
+    70%  { box-shadow: 0 0 0 12px rgba(245,158,11,0); }
+    100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+}
+.countdown-pulse { animation: countdown-pulse 2s infinite; }
+
 div[data-testid="stHorizontalBlock"] > div:nth-child(1) button:not(:disabled) {
     background: linear-gradient(135deg, #dc2626, #991b1b) !important;
     border: 2px solid #ef4444 !important;
@@ -122,21 +108,82 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button:not(:disabled) {
     filter: brightness(1.15) !important;
     transition: all 0.15s ease !important;
 }
-.stButton > button:active:not(:disabled) {
-    transform: translateY(0px) !important;
-}
+.stButton > button:active:not(:disabled) { transform: translateY(0px) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # ── Initialize DataManager ───────────────────────────────────────────────────
 data_manager = DataManager(HISTORY_CSV_FILE)
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# SESSION TIMING HELPERS  (NEW)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _load_session_times() -> dict:
+    """Load session start/end timestamps from disk."""
+    try:
+        if os.path.exists(SESSION_TIMES_FILE):
+            with open(SESSION_TIMES_FILE) as f:
+                data = json.load(f)
+            # Reset if it's from a previous day
+            if data.get("date") == str(date.today()):
+                return data
+    except Exception:
+        pass
+    return {"date": str(date.today()), "session1_end": None, "session2_end": None}
+
+
+def _save_session_times(times: dict):
+    """Persist session timestamps to disk."""
+    times["date"] = str(date.today())
+    with open(SESSION_TIMES_FILE, "w") as f:
+        json.dump(times, f, indent=2)
+
+
+def _mark_session_end(session_num: int):
+    """Record the end time of a completed session."""
+    times = _load_session_times()
+    times[f"session{session_num}_end"] = datetime.now().isoformat()
+    _save_session_times(times)
+
+
+def _seconds_until_session2_unlocks() -> int:
+    """
+    Returns how many seconds remain before session 2 can start.
+    Returns 0 if it's already unlocked.
+    """
+    times = _load_session_times()
+    s1_end_str = times.get("session1_end")
+    if not s1_end_str:
+        return 0  # No session 1 end recorded → don't block (edge case)
+    try:
+        s1_end = datetime.fromisoformat(s1_end_str)
+        unlock_at = s1_end + timedelta(hours=SESSION_GAP_HOURS)
+        remaining = (unlock_at - datetime.now()).total_seconds()
+        return max(0, int(remaining))
+    except Exception:
+        return 0
+
+
+def _format_countdown(seconds: int) -> str:
+    """Format seconds into HH:MM:SS string."""
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _session2_is_locked() -> bool:
+    """True if session 2 cannot start yet (gap not elapsed)."""
+    return _seconds_until_session2_unlocks() > 0
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # FILE I/O HELPERS
 # ════════════════════════════════════════════════════════════════════════════
 
 def save_to_history_csv(session_data: dict):
-    """Append a completed session row to the history CSV."""
     row = {
         "date":            session_data.get("date", str(date.today())),
         "start_bal":       session_data.get("start_bal", 0),
@@ -165,7 +212,6 @@ def save_to_history_csv(session_data: dict):
 
 
 def _session_snapshot() -> dict:
-    """Return a dict of all session-state values we persist to disk."""
     ss = st.session_state
     return {
         "day_started":        ss.day_started,
@@ -219,7 +265,6 @@ def load_current_session() -> dict | None:
             data = json.load(f)
         if data.get("date") == str(date.today()):
             return data
-        # Stale session from a previous day → archive it
         if data.get("day_started") or data.get("trades", 0) > 0:
             save_to_history_csv(data)
         os.remove(CURRENT_SESSION_FILE)
@@ -278,16 +323,13 @@ def _remove_files(*paths):
             pass
 
 
-# FIX 3: Helper to persist last known balance to disk reliably
 def _save_last_balance(bal: float):
-    """Write the last session end balance to disk so it always survives resets."""
     if bal > 0:
         with open("last_balance.json", "w") as f:
             json.dump({"last_session_balance": bal}, f)
 
 
 def _load_last_balance() -> float:
-    """Read the last persisted session balance from disk."""
     try:
         if os.path.exists("last_balance.json"):
             with open("last_balance.json") as f:
@@ -298,10 +340,8 @@ def _load_last_balance() -> float:
 
 
 def reset_session_data() -> bool:
-    """Reset all in-memory state and wipe session files, but carry forward the last balance."""
     try:
         ss = st.session_state
-        # Determine the most recent final balance (prefer session2 > session1 > current balance)
         last_bal = 0.0
         if ss.get("session2_completed") and ss.get("session2_balance", 0) > 0:
             last_bal = float(ss.session2_balance)
@@ -310,13 +350,10 @@ def reset_session_data() -> bool:
         elif ss.get("balance", 0) > 0:
             last_bal = float(ss.balance)
 
-        # Persist to disk BEFORE wiping state so it survives the rerun
         _save_last_balance(last_bal)
-
         _init_state(force=True)
-        _remove_files(CURRENT_SESSION_FILE, DAILY_STATS_FILE)
+        _remove_files(CURRENT_SESSION_FILE, DAILY_STATS_FILE, SESSION_TIMES_FILE)
 
-        # Also set immediately in session_state
         if last_bal > 0:
             st.session_state.last_session_balance = last_bal
         return True
@@ -326,10 +363,9 @@ def reset_session_data() -> bool:
 
 
 def reset_for_new_day() -> bool:
-    """Hard reset – wipe everything including history."""
     try:
         _init_state(force=True)
-        _remove_files(CURRENT_SESSION_FILE, DAILY_STATS_FILE, HISTORY_CSV_FILE)
+        _remove_files(CURRENT_SESSION_FILE, DAILY_STATS_FILE, HISTORY_CSV_FILE, SESSION_TIMES_FILE)
         return True
     except Exception as e:
         st.error(f"Reset error: {e}")
@@ -376,12 +412,11 @@ DEFS = dict(
     session2_player_wins=0,
     session2_losses=0,
     last_session_balance=0.0,
-    trade_log=[],          # list of {time, type, bet, result} — last 10 trades
+    trade_log=[],
 )
 
 
 def _init_state(force: bool = False):
-    """Set session_state from DEFS (skips keys already present unless forced)."""
     for k, v in DEFS.items():
         if force or k not in st.session_state:
             st.session_state[k] = v
@@ -391,7 +426,6 @@ def _init_state(force: bool = False):
 saved_session = load_current_session()
 daily_stats   = load_daily_stats()
 
-# FIX 3 (continued): Load carried-forward balance from disk
 _last_bal_from_disk = _load_last_balance()
 if _last_bal_from_disk > 0:
     DEFS["last_session_balance"] = _last_bal_from_disk
@@ -420,7 +454,6 @@ for k, v in _bootstrap.items():
         st.session_state[k] = v
 
 
-# ── Auto-save helper ─────────────────────────────────────────────────────────
 def auto_save():
     if st.session_state.day_started:
         save_current_session()
@@ -434,17 +467,33 @@ with st.sidebar:
     st.markdown("## 🎮 CONTROL PANEL")
     st.markdown("---")
     st.markdown(f"**📅 Today:** {date.today().strftime('%B %d, %Y')}")
-    st.markdown("---")
 
+    # ── Session gap info ──────────────────────────────────────────────────
+    times_data = _load_session_times()
+    s1_end_str = times_data.get("session1_end")
+    if s1_end_str:
+        try:
+            s1_end    = datetime.fromisoformat(s1_end_str)
+            unlock_at = s1_end + timedelta(hours=SESSION_GAP_HOURS)
+            st.markdown(
+                f'<div style="background:#f59e0b15;border:1px solid #f59e0b55;'
+                f'border-radius:8px;padding:0.4rem 0.6rem;font-size:0.72rem;color:#f59e0b;">'
+                f'⏱ Session 1 ended: {s1_end.strftime("%H:%M")}<br>'
+                f'🔓 Session 2 unlocks: {unlock_at.strftime("%H:%M")}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
+
+    st.markdown("---")
     st.markdown("### 🔧 Reset Options")
 
-    # ── Confirmation state flags ──────────────────────────────────────────
     if "confirm_reset_session" not in st.session_state:
         st.session_state.confirm_reset_session = False
     if "confirm_full_reset" not in st.session_state:
         st.session_state.confirm_full_reset = False
 
-    # ── Reset Session ─────────────────────────────────────────────────────
     if not st.session_state.confirm_reset_session:
         if st.button("🔄 Reset Session", use_container_width=True):
             st.session_state.confirm_reset_session = True
@@ -470,7 +519,6 @@ with st.sidebar:
                 st.session_state.confirm_reset_session = False
                 st.rerun()
 
-    # ── Full Reset ────────────────────────────────────────────────────────
     if not st.session_state.confirm_full_reset:
         if st.button("🗑️ Full Reset", use_container_width=True):
             st.session_state.confirm_full_reset = True
@@ -519,7 +567,11 @@ with st.sidebar:
         elif active:
             st.info(f"🟢 Session {n}: IN PROGRESS")
         elif n == 2 and ss.session1_completed:
-            st.warning(f"⚪ Session {n}: READY")
+            remaining = _seconds_until_session2_unlocks()
+            if remaining > 0:
+                st.warning(f"⏳ Session {n}: LOCKED ({_format_countdown(remaining)})")
+            else:
+                st.warning(f"⚪ Session {n}: READY")
         else:
             st.warning(f"⚪ Session {n}: NOT STARTED")
 
@@ -542,14 +594,12 @@ with st.sidebar:
     if os.path.exists(HISTORY_CSV_FILE):
         df_h = pd.read_csv(HISTORY_CSV_FILE)
         if not df_h.empty:
-            # ── History toggle button ──────────────────────────────────────
             if "show_history" not in st.session_state:
                 st.session_state.show_history = False
             if st.button("📖 View Full History", use_container_width=True):
                 st.session_state.show_history = not st.session_state.show_history
 
             if st.session_state.show_history:
-                # Show last 20 sessions, newest first
                 df_show = df_h.tail(20).iloc[::-1].reset_index(drop=True)
                 for _, row in df_show.iterrows():
                     pnl       = float(row.get("net", 0))
@@ -570,36 +620,22 @@ with st.sidebar:
             border:1px solid {pnl_color}55;border-radius:12px;
             padding:0.7rem 0.8rem;margin-bottom:0.5rem;">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
-    <span style="font-size:0.8rem;font-weight:700;color:#e5e7eb;">
-      {res_icon} Session {sess_num}
-    </span>
+    <span style="font-size:0.8rem;font-weight:700;color:#e5e7eb;">{res_icon} Session {sess_num}</span>
     <span style="font-size:0.72rem;color:#888;">{r_date}</span>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.3rem 0.6rem;">
-    <div>
-      <div style="font-size:0.6rem;color:#666;">START</div>
-      <div style="font-size:0.9rem;font-weight:700;color:#f59e0b;">₹{start_bal:,.0f}</div>
-    </div>
-    <div>
-      <div style="font-size:0.6rem;color:#666;">FINAL</div>
-      <div style="font-size:0.9rem;font-weight:700;color:{pnl_color};">₹{final_bal:,.0f}</div>
-    </div>
-    <div>
-      <div style="font-size:0.6rem;color:#666;">P&amp;L</div>
-      <div style="font-size:0.95rem;font-weight:800;color:{pnl_color};">{pnl_sign}₹{abs(pnl):,.0f}</div>
-    </div>
-    <div>
-      <div style="font-size:0.6rem;color:#666;">WIN RATE</div>
-      <div style="font-size:0.9rem;font-weight:700;color:#a78bfa;">{wr}%</div>
-    </div>
-    <div>
-      <div style="font-size:0.6rem;color:#10b981;">✅ WINS</div>
-      <div style="font-size:0.9rem;font-weight:700;color:#10b981;">{wins}</div>
-    </div>
-    <div>
-      <div style="font-size:0.6rem;color:#ef4444;">❌ LOSSES</div>
-      <div style="font-size:0.9rem;font-weight:700;color:#ef4444;">{losses}</div>
-    </div>
+    <div><div style="font-size:0.6rem;color:#666;">START</div>
+         <div style="font-size:0.9rem;font-weight:700;color:#f59e0b;">₹{start_bal:,.0f}</div></div>
+    <div><div style="font-size:0.6rem;color:#666;">FINAL</div>
+         <div style="font-size:0.9rem;font-weight:700;color:{pnl_color};">₹{final_bal:,.0f}</div></div>
+    <div><div style="font-size:0.6rem;color:#666;">P&amp;L</div>
+         <div style="font-size:0.95rem;font-weight:800;color:{pnl_color};">{pnl_sign}₹{abs(pnl):,.0f}</div></div>
+    <div><div style="font-size:0.6rem;color:#666;">WIN RATE</div>
+         <div style="font-size:0.9rem;font-weight:700;color:#a78bfa;">{wr}%</div></div>
+    <div><div style="font-size:0.6rem;color:#10b981;">✅ WINS</div>
+         <div style="font-size:0.9rem;font-weight:700;color:#10b981;">{wins}</div></div>
+    <div><div style="font-size:0.6rem;color:#ef4444;">❌ LOSSES</div>
+         <div style="font-size:0.9rem;font-weight:700;color:#ef4444;">{losses}</div></div>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -659,30 +695,18 @@ if ss.session2_completed:
                     📊 SESSION {n} RESULTS
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.6rem;">
-                    <div>
-                        <div style="font-size:0.65rem;color:#888;">STARTING</div>
-                        <div style="font-size:1.1rem;font-weight:700;color:#f59e0b;">₹{start:,.0f}</div>
-                    </div>
-                    <div>
-                        <div style="font-size:0.65rem;color:#888;">FINAL</div>
-                        <div style="font-size:1.1rem;font-weight:700;color:{color};">₹{balance:,.0f}</div>
-                    </div>
-                    <div>
-                        <div style="font-size:0.65rem;color:#888;">P&L</div>
-                        <div style="font-size:1.1rem;font-weight:700;color:{color};">{sign}₹{abs(pnl):,.0f}</div>
-                    </div>
-                    <div>
-                        <div style="font-size:0.65rem;color:#10b981;">✅ WINS</div>
-                        <div style="font-size:1rem;font-weight:700;color:#10b981;">{wins}</div>
-                    </div>
-                    <div>
-                        <div style="font-size:0.65rem;color:#ef4444;">❌ LOSSES</div>
-                        <div style="font-size:1rem;font-weight:700;color:#ef4444;">{lw}</div>
-                    </div>
-                    <div>
-                        <div style="font-size:0.65rem;color:#aaa;">🎯 TRADES</div>
-                        <div style="font-size:1rem;font-weight:700;color:#aaa;">{wins + lw}</div>
-                    </div>
+                    <div><div style="font-size:0.65rem;color:#888;">STARTING</div>
+                         <div style="font-size:1.1rem;font-weight:700;color:#f59e0b;">₹{start:,.0f}</div></div>
+                    <div><div style="font-size:0.65rem;color:#888;">FINAL</div>
+                         <div style="font-size:1.1rem;font-weight:700;color:{color};">₹{balance:,.0f}</div></div>
+                    <div><div style="font-size:0.65rem;color:#888;">P&L</div>
+                         <div style="font-size:1.1rem;font-weight:700;color:{color};">{sign}₹{abs(pnl):,.0f}</div></div>
+                    <div><div style="font-size:0.65rem;color:#10b981;">✅ WINS</div>
+                         <div style="font-size:1rem;font-weight:700;color:#10b981;">{wins}</div></div>
+                    <div><div style="font-size:0.65rem;color:#ef4444;">❌ LOSSES</div>
+                         <div style="font-size:1rem;font-weight:700;color:#ef4444;">{lw}</div></div>
+                    <div><div style="font-size:0.65rem;color:#aaa;">🎯 TRADES</div>
+                         <div style="font-size:1rem;font-weight:700;color:#aaa;">{wins + lw}</div></div>
                 </div>
             </div>
         """, unsafe_allow_html=True)
@@ -690,7 +714,7 @@ if ss.session2_completed:
     _session_result_card(1)
     _session_result_card(2)
 
-    total_pnl  = ss.session1_pnl + ss.session2_pnl
+    total_pnl = ss.session1_pnl + ss.session2_pnl
     tc = "#10b981" if total_pnl >= 0 else "#ef4444"
     ts = "+" if total_pnl >= 0 else ""
     st.markdown(f"""
@@ -698,14 +722,10 @@ if ss.session2_completed:
                     padding:1rem;margin:0.6rem 0;">
             <div style="font-size:1rem;font-weight:700;margin-bottom:0.4rem;">📈 TOTAL DAY SUMMARY</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
-                <div>
-                    <div style="font-size:0.65rem;color:#888;">TOTAL P&amp;L</div>
-                    <div style="font-size:1.6rem;font-weight:700;color:{tc};">{ts}₹{abs(total_pnl):,.0f}</div>
-                </div>
-                <div>
-                    <div style="font-size:0.65rem;color:#888;">SESSIONS</div>
-                    <div style="font-size:1.6rem;font-weight:700;">2 / 2</div>
-                </div>
+                <div><div style="font-size:0.65rem;color:#888;">TOTAL P&amp;L</div>
+                     <div style="font-size:1.6rem;font-weight:700;color:{tc};">{ts}₹{abs(total_pnl):,.0f}</div></div>
+                <div><div style="font-size:0.65rem;color:#888;">SESSIONS</div>
+                     <div style="font-size:1.6rem;font-weight:700;">2 / 2</div></div>
             </div>
         </div>
     """, unsafe_allow_html=True)
@@ -723,20 +743,94 @@ if ss.session2_completed:
 if not ss.day_started:
     session_num = 2 if ss.session1_completed and not ss.session2_completed else 1
 
-    # ── FIX 3: Starting balance ALWAYS uses the last session's end balance ──
-    # Priority chain (highest → lowest):
-    #   1. Session 2's final balance  (if session2 just completed)
-    #   2. Session 1's final balance  (if session1 just completed)
-    #   3. last_session_balance       (carried forward across days via disk)
-    #   4. 1000 fallback              (very first ever launch)
+    # ── 6-Hour Gap Lockout Screen (session 2 only) ─────────────────────────
+    if session_num == 2 and _session2_is_locked():
+        remaining_secs = _seconds_until_session2_unlocks()
+        times_data     = _load_session_times()
+        s1_end_str     = times_data.get("session1_end", "")
+        try:
+            s1_end    = datetime.fromisoformat(s1_end_str)
+            unlock_at = s1_end + timedelta(hours=SESSION_GAP_HOURS)
+            unlock_str = unlock_at.strftime("%I:%M %p")
+            ended_str  = s1_end.strftime("%I:%M %p")
+        except Exception:
+            unlock_str = "—"
+            ended_str  = "—"
+
+        h = remaining_secs // 3600
+        m = (remaining_secs % 3600) // 60
+        s_sec = remaining_secs % 60
+
+        # Session 1 summary while waiting
+        prev_pnl   = ss.session1_pnl
+        prev_color = "#10b981" if prev_pnl >= 0 else "#ef4444"
+        prev_sign  = "+" if prev_pnl >= 0 else ""
+
+        st.markdown(f"""
+            <div class="countdown-pulse"
+                 style="background:linear-gradient(135deg,#1a0f00,#2d1a00);
+                         border:2px solid #f59e0b;border-radius:20px;
+                         padding:2rem;text-align:center;margin:1rem 0;">
+                <div style="font-size:2rem;margin-bottom:0.5rem;">⏳ SESSION 2 LOCKED</div>
+                <div style="font-size:0.9rem;color:#f59e0b80;margin-bottom:1.2rem;">
+                    Minimum {SESSION_GAP_HOURS}-hour gap between sessions required
+                </div>
+                <div style="font-size:0.75rem;color:#888;margin-bottom:0.4rem;">TIME REMAINING</div>
+                <div style="font-size:4rem;font-weight:900;color:#f59e0b;
+                            font-family:'Rajdhani',monospace;letter-spacing:4px;line-height:1;">
+                    {h:02d}:{m:02d}:{s_sec:02d}
+                </div>
+                <div style="font-size:0.8rem;color:#888;margin-top:1rem;">
+                    Session 1 ended at <strong style="color:#f59e0b;">{ended_str}</strong>
+                    &nbsp;·&nbsp;
+                    Session 2 unlocks at <strong style="color:#10b981;">{unlock_str}</strong>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Show session 1 result while waiting
+        st.markdown(f"""
+            <div style="background:{prev_color}10;border:1px solid {prev_color};
+                        border-radius:12px;padding:1rem;text-align:center;margin-bottom:1rem;">
+                <div style="font-size:0.7rem;color:#888;letter-spacing:1px;">SESSION 1 RESULT</div>
+                <div style="font-size:1.6rem;font-weight:800;color:{prev_color};margin-top:0.2rem;">
+                    {prev_sign}₹{abs(prev_pnl):,.0f}
+                </div>
+                <div style="font-size:0.85rem;margin-top:0.2rem;">
+                    Final Balance: <strong style="color:{prev_color};">₹{ss.session1_balance:,.0f}</strong>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Tip box
+        st.markdown("""
+            <div style="background:#ffffff08;border:1px solid #333;border-radius:10px;
+                        padding:0.8rem;text-align:center;color:#888;font-size:0.82rem;">
+                💡 <strong style="color:#e5e7eb;">Why the gap?</strong>
+                Taking a break between sessions helps you stay disciplined,
+                reset emotionally, and make clearer decisions in Session 2.
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Auto-refresh every 60 seconds so countdown stays live
+        st.markdown("""
+            <script>
+                setTimeout(function() { window.location.reload(); }, 60000);
+            </script>
+        """, unsafe_allow_html=True)
+
+        # Manual refresh button
+        if st.button("🔄 Refresh Countdown", use_container_width=True):
+            st.rerun()
+
+        st.stop()
+
+    # ── Normal session setup ───────────────────────────────────────────────
     if session_num == 2:
-        # Session 2 always starts from where Session 1 ended
         default_start = float(ss.session1_balance) if ss.session1_balance > 0 else 1000.0
     else:
-        # Session 1: use whatever was carried forward (from yesterday's last session)
         carried = float(ss.get("last_session_balance", 0.0))
         if carried <= 0:
-            # Try disk as last resort (covers cross-rerun edge cases)
             carried = _load_last_balance()
         default_start = carried if carried > 0 else 1000.0
 
@@ -748,6 +842,10 @@ if not ss.day_started:
             <strong style="color:{accent};font-size:1rem;">
                 🎯 Session {session_num} of 2
             </strong>
+            &nbsp;&nbsp;
+            <span style="font-size:0.78rem;color:#888;">
+                (Daily limit: 2 sessions · {SESSION_GAP_HOURS}h gap enforced)
+            </span>
         </div>
     """, unsafe_allow_html=True)
 
@@ -755,10 +853,20 @@ if not ss.day_started:
         prev_pnl   = ss.session1_pnl
         prev_color = "#10b981" if prev_pnl >= 0 else "#ef4444"
         prev_sign  = "+" if prev_pnl >= 0 else ""
+        # Show when session 1 ended
+        times_data = _load_session_times()
+        s1_end_str = times_data.get("session1_end", "")
+        ended_label = ""
+        if s1_end_str:
+            try:
+                ended_label = f" · Ended at {datetime.fromisoformat(s1_end_str).strftime('%I:%M %p')}"
+            except Exception:
+                pass
+
         st.markdown(f"""
             <div style="background:{prev_color}10;border:1px solid {prev_color};
                         border-radius:8px;padding:0.5rem;text-align:center;margin-bottom:0.8rem;">
-                <div style="font-size:0.65rem;color:#888;">SESSION 1 RESULT</div>
+                <div style="font-size:0.65rem;color:#888;">SESSION 1 RESULT{ended_label}</div>
                 <div style="font-size:1rem;font-weight:700;color:{prev_color};">
                     {prev_sign}₹{abs(prev_pnl):,.0f}
                 </div>
@@ -861,6 +969,10 @@ balance_color = "#10b981" if net > 0 else ("#ef4444" if net < 0 else "#f59e0b")
 # ── Handle session completion ────────────────────────────────────────────────
 if game_over and not ss.get("saved", False):
     n = ss.current_session
+
+    # NEW: Record session end time BEFORE saving stats
+    _mark_session_end(n)
+
     if n == 1:
         ss.session1_completed   = True
         ss.sessions_played      = 1
@@ -878,7 +990,6 @@ if game_over and not ss.get("saved", False):
         ss.session2_player_wins = ss.player_wins
         ss.session2_losses      = ss.losses
 
-    # FIX 3: Persist the final balance to disk when a session ends
     _save_last_balance(ss.balance)
 
     save_to_history_csv({
@@ -907,11 +1018,9 @@ if game_over and not ss.get("saved", False):
     save_daily_stats()
     st.rerun()
 
-# Auto-save every render
 if ss.day_started and not game_over:
     auto_save()
 
-# Safety-net banner (normally never reached due to rerun above)
 if stop_hit or target_hit:
     label = (
         f"🛑 SESSION {ss.current_session} STOP LOSS HIT"
@@ -933,6 +1042,8 @@ st.markdown(f"""
                 border-radius:10px;padding:0.4rem;text-align:center;margin-bottom:0.6rem;">
         <span style="font-size:0.85rem;font-weight:700;">
             🎯 ACTIVE SESSION: {ss.current_session} of 2
+            &nbsp;·&nbsp;
+            <span style="font-size:0.75rem;color:#a5b4fc;">Daily limit: 2 sessions · {SESSION_GAP_HOURS}h gap enforced</span>
         </span>
     </div>
 """, unsafe_allow_html=True)
@@ -946,9 +1057,7 @@ with c1:
                     border:2px solid #f59e0b;border-radius:12px;
                     padding:0.8rem;text-align:center;">
             <div style="font-size:0.8rem;color:#f59e0b;letter-spacing:1px;font-weight:600;">💰 STARTING BALANCE</div>
-            <div style="font-size:2rem;font-weight:800;color:#f59e0b;margin-top:0.2rem;">
-                ₹{ss.start_bal:,.0f}
-            </div>
+            <div style="font-size:2rem;font-weight:800;color:#f59e0b;margin-top:0.2rem;">₹{ss.start_bal:,.0f}</div>
             <div style="font-size:0.75rem;color:#f59e0b80;">Initial Capital</div>
         </div>
     """, unsafe_allow_html=True)
@@ -961,9 +1070,7 @@ with c2:
         <div style="background:{pl_color}10;border:2px solid {pl_color};border-radius:12px;
                     padding:0.8rem;text-align:center;">
             <div style="font-size:0.8rem;color:{pl_color};letter-spacing:1px;font-weight:600;">{pl_icon} CURRENT P&amp;L</div>
-            <div style="font-size:2rem;font-weight:800;color:{pl_color};margin-top:0.2rem;">
-                {pl_sign}₹{net:,.0f}
-            </div>
+            <div style="font-size:2rem;font-weight:800;color:{pl_color};margin-top:0.2rem;">{pl_sign}₹{net:,.0f}</div>
             <div style="font-size:0.75rem;color:{pl_color}80;">Profit &amp; Loss</div>
         </div>
     """, unsafe_allow_html=True)
@@ -973,9 +1080,7 @@ with c3:
         <div style="background:{balance_color}10;border:2px solid {balance_color};border-radius:12px;
                     padding:0.8rem;text-align:center;">
             <div style="font-size:0.8rem;color:{balance_color};letter-spacing:1px;font-weight:600;">💰 CURRENT BALANCE</div>
-            <div style="font-size:2rem;font-weight:800;color:{balance_color};margin-top:0.2rem;">
-                ₹{ss.balance:,.0f}
-            </div>
+            <div style="font-size:2rem;font-weight:800;color:{balance_color};margin-top:0.2rem;">₹{ss.balance:,.0f}</div>
             <div style="font-size:0.75rem;color:{balance_color}80;">Updated Balance</div>
         </div>
     """, unsafe_allow_html=True)
@@ -989,10 +1094,10 @@ _mini = lambda bg, color, label, value: f"""
     </div>
 """
 total_wins = ss.banker_wins + ss.player_wins
-with c1: st.markdown(_mini("#10b98115", "#10b981", "✅ WINS",     total_wins),            unsafe_allow_html=True)
-with c2: st.markdown(_mini("#ef444415", "#ef4444", "❌ LOSSES",   ss.losses),             unsafe_allow_html=True)
-with c3: st.markdown(_mini("#ffffff08", "#a78bfa", "📊 WIN RATE", f"{win_rate:.0f}%"),    unsafe_allow_html=True)
-with c4: st.markdown(_mini("#ffffff08", "#94a3b8", "🎯 TRADES",   ss.trades),             unsafe_allow_html=True)
+with c1: st.markdown(_mini("#10b98115", "#10b981", "✅ WINS",     total_wins),         unsafe_allow_html=True)
+with c2: st.markdown(_mini("#ef444415", "#ef4444", "❌ LOSSES",   ss.losses),          unsafe_allow_html=True)
+with c3: st.markdown(_mini("#ffffff08", "#a78bfa", "📊 WIN RATE", f"{win_rate:.0f}%"), unsafe_allow_html=True)
+with c4: st.markdown(_mini("#ffffff08", "#94a3b8", "🎯 TRADES",   ss.trades),          unsafe_allow_html=True)
 
 # ── Remaining amount card ────────────────────────────────────────────────────
 st.markdown(f"""
@@ -1000,9 +1105,7 @@ st.markdown(f"""
                 border:2px solid {remaining_color};border-radius:15px;
                 padding:0.8rem;text-align:center;margin:0.7rem 0;">
         <div style="font-size:0.9rem;color:{remaining_color};font-weight:600;">{status_text}</div>
-        <div style="font-size:2.8rem;font-weight:800;color:{remaining_color};">
-            ₹{remaining_amount:,.0f}
-        </div>
+        <div style="font-size:2.8rem;font-weight:800;color:{remaining_color};">₹{remaining_amount:,.0f}</div>
         <div style="font-size:0.9rem;margin-top:0.3rem;font-weight:600;">
             🛑 Stop: ₹{sl_amt:,.0f} &nbsp;|&nbsp; 🎯 Target: ₹{tg_amt:,.0f}
         </div>
@@ -1047,12 +1150,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════════════════
-# CHIP GRID — 5 columns, 3 chips each, same color per column
-# Col 1: ₹10, ₹20, ₹40      (indigo)
-# Col 2: ₹60, ₹80, ₹100     (rose)
-# Col 3: ₹120, ₹140, ₹160   (amber)
-# Col 4: ₹180, ₹200, ₹400   (emerald)
-# Col 5: ₹500, ₹800, ₹1000  (cyan)
+# CHIP GRID
 # ════════════════════════════════════════════════════════════════════════════
 st.markdown(
     '<div style="font-size:0.9rem;font-weight:700;margin:0.4rem 0 0.3rem 0;'
@@ -1060,10 +1158,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 5 column colors
 COL_COLORS = ["#6366f1", "#f43f5e", "#f59e0b", "#10b981", "#06b6d4"]
 
-# Chips arranged column-first: col0=[10,20,40], col1=[60,80,100], etc.
 CHIP_COLS = [
     [{"label": "₹10",   "coin": 10},   {"label": "₹20",   "coin": 20},   {"label": "₹40",   "coin": 40}],
     [{"label": "₹60",   "coin": 60},   {"label": "₹80",   "coin": 80},   {"label": "₹100",  "coin": 100}],
@@ -1072,7 +1168,6 @@ CHIP_COLS = [
     [{"label": "₹500",  "coin": 500},  {"label": "₹800",  "coin": 800},  {"label": "₹1000", "coin": 1000}],
 ]
 
-# Inject CSS: color each column's buttons uniformly
 chip_css = ["<style>"]
 for ci, color in enumerate(COL_COLORS):
     chip_css.append(f"""
@@ -1089,7 +1184,6 @@ for ci, color in enumerate(COL_COLORS):
 chip_css.append("</style>")
 st.markdown("".join(chip_css), unsafe_allow_html=True)
 
-# Render 3 rows, each with 5 columns (one chip per column per row)
 st.markdown('<div class="chip-grid2">', unsafe_allow_html=True)
 for row_i in range(3):
     cols = st.columns(5)
@@ -1182,7 +1276,6 @@ with c1:
         ss.bet          = 0.0
         ss.bet_history  = []
         commission = amt - winnings
-        # Append to trade log (keep last 10)
         _log = ss.get("trade_log", [])
         _log.append({"time": datetime.now().strftime("%H:%M:%S"), "type": "BANKER", "bet": amt, "result": winnings})
         ss.trade_log = _log[-10:]
@@ -1201,7 +1294,6 @@ with c2:
         ss.trades      += 1
         ss.bet          = 0.0
         ss.bet_history  = []
-        # Append to trade log (keep last 10)
         _log = ss.get("trade_log", [])
         _log.append({"time": datetime.now().strftime("%H:%M:%S"), "type": "PLAYER", "bet": amt, "result": amt})
         ss.trade_log = _log[-10:]
@@ -1220,7 +1312,6 @@ with c3:
         ss.trades   += 1
         ss.bet       = 0.0
         ss.bet_history = []
-        # Append to trade log (keep last 10)
         _log = ss.get("trade_log", [])
         _log.append({"time": datetime.now().strftime("%H:%M:%S"), "type": "LOSS", "bet": amt, "result": -amt})
         ss.trade_log = _log[-10:]
@@ -1253,20 +1344,17 @@ if not trade_log:
         </div>
     """, unsafe_allow_html=True)
 else:
-    # Header row
     st.markdown("""
         <div style="display:grid;grid-template-columns:90px 1fr 100px 110px;
                     gap:0.4rem;padding:0.45rem 0.8rem;
                     font-size:0.78rem;color:#888;letter-spacing:1px;font-weight:700;
                     border-bottom:1px solid #2a2a3e;margin-bottom:0.2rem;">
-            <div>TIME</div>
-            <div>TYPE</div>
+            <div>TIME</div><div>TYPE</div>
             <div style="text-align:right;">BET</div>
             <div style="text-align:right;">RESULT</div>
         </div>
     """, unsafe_allow_html=True)
 
-    # Rows — most recent first
     rows_html = ""
     for trade in reversed(trade_log):
         result  = trade["result"]
@@ -1280,20 +1368,14 @@ else:
         r_text  = f"{r_sign}₹{abs(result):,.0f}"
 
         if t_type == "BANKER":
-            type_icon  = "🔴"
-            type_color = "#f87171"
-            type_label = "Banker"
+            type_icon, type_color, type_label = "🔴", "#f87171", "Banker"
         elif t_type == "PLAYER":
-            type_icon  = "🔵"
-            type_color = "#60a5fa"
-            type_label = "Player"
+            type_icon, type_color, type_label = "🔵", "#60a5fa", "Player"
         else:
-            type_icon  = "⚫"
-            type_color = "#9ca3af"
-            type_label = "Loss"
+            type_icon, type_color, type_label = "⚫", "#9ca3af", "Loss"
 
-        bg      = "#10b98112" if is_win else "#ef444412"
-        border  = "#10b98130" if is_win else "#ef444430"
+        bg     = "#10b98112" if is_win else "#ef444412"
+        border = "#10b98130" if is_win else "#ef444430"
 
         rows_html += f"""
         <div style="display:grid;grid-template-columns:90px 1fr 100px 110px;
